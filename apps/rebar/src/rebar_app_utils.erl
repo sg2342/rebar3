@@ -284,7 +284,17 @@ dep_to_app(Parent, DepsDir, Name, Vsn, Source0, IsLock, State) ->
 %% and optionally get the version. Because of this we must keep the clone as a
 %% usable git repo clone and using a subdir can not be copied out of it but must
 %% have the app info set its directory to be a sub directory of the repo.
-subdir(Name, {git_subdir, _Repo, _Ref, Dir}=Source) ->
+subdir(Name, {git_subdir, _Repo, _Ref, _Dir}=Source) ->
+    case os:getenv("REBAR_GIT_IS_GOT") of
+        false ->
+            git_subdir(Name, Source);
+        _ ->
+            {"", Source}
+    end;
+subdir(_, Source) ->
+    {"", Source}.
+
+git_subdir(Name, {git_subdir, _Repo, _Ref, Dir} = Source) ->
     NameList = rebar_utils:to_list(Name),
 
     %% To work with Erlang's `code' server the directory the application is in
@@ -298,9 +308,7 @@ subdir(Name, {git_subdir, _Repo, _Ref, Dir}=Source) ->
         false ->
             NewDir = filename:join(Dir, NameList),
             {NewDir, {git_subdir, _Repo, _Ref, NewDir}}
-    end;
-subdir(_, Source) ->
-    {"", Source}.
+    end.
 
 %% @doc Takes a given application app_info record along with the project.
 %% If the app is a package, resolve and expand the package definition.
