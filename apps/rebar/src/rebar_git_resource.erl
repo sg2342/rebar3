@@ -37,9 +37,18 @@ lock(AppInfo, _) ->
 lock_(AppDir, {git, Url, _}) ->
     lock_(AppDir, {git, Url});
 lock_(AppDir, {git, Url}) ->
+    AbortMsg = lists:flatten(io_lib:format("Locking of git dependency failed in ~ts", [AppDir])),
     case git_vsn() of
+        got ->
+            {ok, Lines} = rebar_utils:sh("got log -l1 -c HEAD",
+                                         [{use_stdout, false},
+                                          {debug_abort_on_error, AbortMsg},
+                                          {cd, AppDir}]),
+            CommitLine = string:nth_lexeme(Lines, 2 , "\n"),
+            Commit = string:nth_lexeme(CommitLine, 2, " "),
+            Ref = string:slice(Commit, 0, 8),
+            {git, Url, {ref, Ref}};
         GitVsn when GitVsn >= {1,8,5} ->
-            AbortMsg = lists:flatten(io_lib:format("Locking of git dependency failed in ~ts", [AppDir])),
             Dir = rebar_utils:escape_double_quotes(AppDir),
             {ok, VsnString} =
                 case os:type() of
