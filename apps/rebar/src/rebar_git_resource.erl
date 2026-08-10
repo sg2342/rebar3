@@ -258,7 +258,11 @@ git_vsn() ->
     case application:get_env(rebar, git_vsn) of
         {ok, GitVsn} -> GitVsn;
         undefined ->
-            GitVsn = git_vsn_fetch(),
+            GitVsn =
+                case os:getenv("REBAR_GIT_IS_GOT") of
+                    false -> git_vsn_fetch();
+                    _ -> got
+                end,
             application:set_env(rebar, git_vsn, GitVsn),
             GitVsn
     end.
@@ -280,7 +284,12 @@ git_vsn_fetch() ->
 
 make_vsn(AppInfo, _) ->
     Dir = rebar_app_info:dir(AppInfo),
+    GitVsn = git_vsn(),
     case rebar_app_info:original_vsn(AppInfo) of
+        {git, short} when GitVsn =:= got ->
+            got_ref(Dir, short);
+        {git, long} when GitVsn =:= got ->
+            got_ref(Dir, long);
         {git, short} ->
             git_ref(Dir, "--short");
         {git, long} ->
@@ -301,6 +310,26 @@ make_vsn_(Dir) ->
 
 %% Internal functions
 
+got_ref(Dir, Arg) ->
+    case rebar_utils:sh("got log -l1 -c HEAD",
+                        [{use_stdout, false},
+                         return_on_error,
+                         {cd, Dir}]) of
+        {error, _} ->
+             ?WARN("Getting ref of git repo failed in ~ts. "
+                  "Falling back to version 0", [Dir]),
+            {plain, "0"};
+        {ok, Lines} ->
+            CommitLine =  string:nth_lexeme(Lines, 2, "\n"),
+            Ref = string:nth_lexeme(CommitLine, 2, " "),
+            case Arg of
+                short ->
+                    {plain, string:slice(Ref, 0, 8)};
+                long ->
+                    {plain, Ref}
+            end
+    end.
+
 git_ref(Dir, Arg) ->
     case rebar_utils:sh("git rev-parse " ++ Arg ++ " HEAD",
                        [{use_stdout, false},
@@ -315,6 +344,14 @@ git_ref(Dir, Arg) ->
     end.
 
 collect_default_refcount(Dir) ->
+    case git_vsn() of
+        got ->
+            collect_default_refcount_got(Dir);
+        _ ->
+            collect_default_refcount_git(Dir)
+    end.
+
+collect_default_refcount_git(Dir) ->
     %% Get the tag timestamp and minimal ref from the system. The
     %% timestamp is really important from an ordering perspective.
     Command = "git log -n 1 --pretty=format:\"%h\n\" ",
@@ -346,6 +383,56 @@ collect_default_refcount(Dir) ->
                         get_patch_count(Dir, Tag)
                 end,
             {TagVsn, RawRef, RawCount}
+    end.
+
+collect_default_refcount_got(Dir) ->
+    Command0 = "got log -l 1 -c HEAD",
+    case rebar_utils:sh(Command0,
+                        [{use_stdout, false},
+                         return_on_error,
+                         {cd, Dir}]) of
+        {error, {Rc, Error}} ->
+             ?WARN("Getting log of git repo failed in ~ts. "
+                  "Falling back to version 0.0.0", [Dir]),
+            ?DIAGNOSTIC("Command sh(~ts)~n"
+                        "returned error code ~w with the following output:~n"
+                        "~ts", [Command0, Rc, Error]),
+            {plain, "0.0.0"};
+        {ok, Lines0} ->
+            CommitLine0 = string:nth_lexeme(Lines0, 2, "\n"),
+            CommitLine1 = string:prefix(CommitLine0, "commit "),
+            [RawRef | MaybeTagsAndBranches] = string:split(CommitLine1, " ", leading),
+            case got_parse_tags(MaybeTagsAndBranches) of
+                [Tag | _] ->
+                    {Tag, string:slice(RawRef, 0, 8), 0};
+                [] ->
+                    {Tag, RawCount} =
+                        got_tag_and_count(Dir),
+                    {Tag, string:slice(RawRef, 0, 8), RawCount}
+            end
+    end.
+
+got_parse_tags(String0) when is_list(String0), length(String0) > 2 ->
+    String = string:slice(String0, 1, string:length(String0) -2),
+    Tags0 = string:split(String, ", ", all),
+    Tags1 = [ string:prefix(S, "tags/") || S <- Tags0 ],
+    [ S || S <- Tags1, S /= nomatch ];
+got_parse_tags(_) -> [].
+
+got_tag_and_count(Dir) ->
+    AbortMsg2 = "Getting rev-list of git dependency failed in " ++ Dir,
+    {ok, Lines} = rebar_utils:sh("got log -b -t -s -c HEAD",
+                                 [{cd, Dir},
+                                  {use_stdout, false},
+                                  {debug_abort_on_error, AbortMsg2}]),
+    got_tag_and_count(string:lexemes(Lines, "\n"), 0).
+
+got_tag_and_count([Line | Rest], Count) ->
+    case string:prefix(string:nth_lexeme(Line, 2, " "), "tags/") of
+        nomatch ->
+            got_tag_and_count(Rest, Count + 1);
+        Tag ->
+            {Tag, Count}
     end.
 
 build_vsn_string(Vsn, RawRef, Count) ->
