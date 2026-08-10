@@ -212,6 +212,20 @@ try_vsn(Fun) ->
     end.
 
 git_ref(Arg) ->
+    case os:getenv("REBAR_GIT_IS_GOT") of
+	false -> git_ref_(Arg);
+	_ when Arg =:= "--short" ->
+	    string:slice(got_ref(), 0, 8);
+	_ ->
+	    got_ref()
+    end.
+
+got_ref() ->
+    Lines = rlx_util:sh("got log -l1"),
+    Line = string:nth_lexeme(Lines, 2, "\n"),
+    string:nth_lexeme(Line, 2, "\n").
+
+git_ref_(Arg) ->
     String = rlx_util:sh("git rev-parse " ++ Arg ++ " HEAD"),
     Vsn = rlx_string:trim(String, both, "\n"),
     case length(Vsn) =:= 40 orelse length(Vsn) =:= 7 of
@@ -227,8 +241,44 @@ git_ref(Arg) ->
     end.
 
 git_tag_vsn() ->
-    {Vsn, RawRef, RawCount} = collect_default_refcount(),
+    {Vsn, RawRef, RawCount} =
+	case os:getenv("REBAR_GIT_IS_GOT") of
+	    false -> collect_default_refcount();
+	    _ -> collect_default_refcount_got()
+	end,
     build_vsn_string(Vsn, RawRef, RawCount).
+
+collect_default_refcount_got() ->
+    Lines = rlx_util:sh("got log -l1"),
+    Line0 = string:nth_lexeme(Lines, 2, "\n"),
+    Line = string:prefix(Line0, "commit "),
+    [Commit | MaybeTagsAndBranches] = string:split(Line, " ", leading),
+    ShortCommit = string:slice(Commit, 0, 8),
+    case got_parse_tags(MaybeTagsAndBranches) of
+	[Tag | _ ] ->
+	    {Tag, ShortCommit, "0"};
+	_ ->
+	    {Tag, Count} = got_tag_and_count(),
+	    {Tag, ShortCommit, integer_to_list(Count)}
+    end.
+
+got_parse_tags([String0]) when is_list(String0), length(String0) > 2 ->
+    String = string:slice(String0, 1, string:length(String0) - 2),
+    Tags0 = string:split(String, ", ", all),
+    Tags1 = [ string:prefix(S, "tags/") || S <- Tags0 ],
+    [ S || S <- Tags1, S =/= nomatch ];
+got_parse_tags(_) -> [].
+
+got_tag_and_count() ->
+    Lines = rlx_util:sh("got log -b -t -s"),
+    got_tag_and_count(string:lexemes(Lines, "\n"), 0).
+
+got_tag_and_count([], Count) -> {"0.0.0", Count};
+got_tag_and_count([Line | Rest], Count) ->
+    case string:prefix(string:nth_lexeme(Line, 2, " "), "tags/") of
+	nomatch -> got_tag_and_count(Rest, Count + 1);
+	Tag -> {Tag, Count}
+    end.
 
 collect_default_refcount() ->
     %% Get the tag timestamp and minimal ref from the system. The
