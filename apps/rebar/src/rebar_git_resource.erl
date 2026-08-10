@@ -40,7 +40,7 @@ lock_(AppDir, {git, Url}) ->
     AbortMsg = lists:flatten(io_lib:format("Locking of git dependency failed in ~ts", [AppDir])),
     case git_vsn() of
         got ->
-            {ok, Lines} = rebar_utils:sh("got log -l1 -c HEAD",
+            {ok, Lines} = rebar_utils:sh("got log -l1",
                                          [{use_stdout, false},
                                           {debug_abort_on_error, AbortMsg},
                                           {cd, AppDir}]),
@@ -198,6 +198,30 @@ maybe_warn_local_url(Url) ->
     end.
 
 %% Use different git clone commands depending on git --version
+git_clone(What, got, Url, Dir, Branch) when What =:= branch ; What =:= tag ->
+    TmpRepoDir = ec_file:insecure_mkdtemp(),
+    rebar_utils:sh(?FMT("got clone -b ~ts ~ts ~ts",
+                        [rebar_utils:escape_chars(Branch),
+                         rebar_utils:escape_chars(Url),
+                         TmpRepoDir]), []),
+    rebar_utils:sh(?FMT("got checkout -b ~ts ~ts ~ts",
+                        [rebar_utils:escape_chars(Branch),
+                         TmpRepoDir, Dir]), []),
+    rebar_file_utils:mv(TmpRepoDir, filename:join(Dir, ".git")),
+    file:write_file(filename:join([Dir, ".got", "repository"]), ".git\n"),
+    ok;
+git_clone(ref, got, Url, Dir, Ref) ->
+    TmpRepoDir = ec_file:insecure_mkdtemp(),
+    rebar_utils:sh(?FMT("got clone -a ~ts ~ts",
+                        [rebar_utils:escape_chars(Url),
+                         TmpRepoDir]), []),
+    rebar_utils:sh(?FMT("got branch -c ~ts -r ~ts ~ts/~ts",
+                        [Ref, TmpRepoDir, Ref, Ref]), []),
+    rebar_utils:sh(?FMT("got checkout -b ~ts/~ts ~ts ~ts",
+                        [Ref, Ref, TmpRepoDir, Dir]), []),
+    rebar_file_utils:mv(TmpRepoDir, filename:join(Dir, ".git")),
+    file:write_file(filename:join([Dir, ".got", "repository"]), ".git\n"),
+    ok;
 git_clone(branch, GitVsn, Url, Dir, Branch) when GitVsn >= {2,3,0}; GitVsn =:= undefined ->
     rebar_utils:sh(?FMT("git clone ~ts ~ts ~ts -b ~ts --single-branch",
                         [git_clone_options(),
@@ -320,7 +344,7 @@ make_vsn_(Dir) ->
 %% Internal functions
 
 got_ref(Dir, Arg) ->
-    case rebar_utils:sh("got log -l1 -c HEAD",
+    case rebar_utils:sh("got log -l1",
                         [{use_stdout, false},
                          return_on_error,
                          {cd, Dir}]) of
@@ -395,7 +419,7 @@ collect_default_refcount_git(Dir) ->
     end.
 
 collect_default_refcount_got(Dir) ->
-    Command0 = "got log -l 1 -c HEAD",
+    Command0 = "got log -l 1",
     case rebar_utils:sh(Command0,
                         [{use_stdout, false},
                          return_on_error,
@@ -430,12 +454,13 @@ got_parse_tags(_) -> [].
 
 got_tag_and_count(Dir) ->
     AbortMsg2 = "Getting rev-list of git dependency failed in " ++ Dir,
-    {ok, Lines} = rebar_utils:sh("got log -b -t -s -c HEAD",
+    {ok, Lines} = rebar_utils:sh("got log -b -t -s",
                                  [{cd, Dir},
                                   {use_stdout, false},
                                   {debug_abort_on_error, AbortMsg2}]),
     got_tag_and_count(string:lexemes(Lines, "\n"), 0).
 
+got_tag_and_count([], Count) -> {"0.0.0", Count};
 got_tag_and_count([Line | Rest], Count) ->
     case string:prefix(string:nth_lexeme(Line, 2, " "), "tags/") of
         nomatch ->
