@@ -72,14 +72,41 @@ needs_update(AppInfo, _) ->
     check_type_support(),
     needs_update_(rebar_app_info:dir(AppInfo), rebar_app_info:source(AppInfo)).
 
-needs_update_(Dir, {git, Url, {tag, Tag}}) ->
+needs_update_(Dir, GitTuple) ->
+    needs_update_(git_vsn(), Dir, GitTuple).
+
+needs_update_(got, Dir, {git, Url, {What, TagOrBranch}})
+  when What =:= tag ; What =:= branch ->
+    RefsPfx =
+        case What of
+            tag -> "refs/tags/" ++ TagOrBranch ++ ": ";
+            branch -> "refs/heads/" ++ TagOrBranch ++ ": " end,
+    {ok, FetchOutput0} =
+        rebar_utils:sh("got fetch -l", [{cd, Dir}]),
+    FetchOutput1 = string:lexemes(FetchOutput0, "\n"),
+    FetchOutput2 = [string:prefix(S, RefsPfx) || S <- FetchOutput1],
+    [RemoteCommit] = [S || S <- FetchOutput2, S /= nomatch],
+    {ok, LogOutput0} = rebar_utils:sh("got log -l 1", [{cd, Dir}]),
+    LogOutput1 = string:nth_lexeme(LogOutput0, 2, "\n"),
+    LogOutput2 = string:prefix(LogOutput1, "commit "),
+    [WorkDirCommit | _] = string:split(LogOutput2, " ", leading),
+    not ((WorkDirCommit =:= RemoteCommit) andalso compare_url(Dir, Url));
+needs_update_(got, Dir, {git, Url, {ref, Ref}}) ->
+    needs_update_(got, Dir, {git, Url, Ref});
+needs_update_(got, Dir, {git, Url, Rev}) ->
+    {ok, Lines0} = rebar_utils:sh("got log -l 1", [{cd, Dir}]),
+    CommitLine0 = string:nth_lexeme(Lines0, 2, "\n"),
+    CommitLine1 = string:prefix(CommitLine0, "commit "),
+    [Commit | _] = string:split(CommitLine1, " ", leading),
+    not (is_list(string:prefix(Commit, Rev)) andalso compare_url(Dir, Url));
+needs_update_(_, Dir, {git, Url, {tag, Tag}}) ->
     {ok, Current} = rebar_utils:sh(?FMT("git describe --tags --exact-match", []),
                                    [{cd, Dir}]),
     Current1 = rebar_string:trim(rebar_string:trim(Current, both, "\n"),
                                  both, "\r"),
     ?DEBUG("Comparing git tag ~ts with ~ts", [Tag, Current1]),
     not ((Current1 =:= Tag) andalso compare_url(Dir, Url));
-needs_update_(Dir, {git, Url, {branch, Branch}}) ->
+needs_update_(_, Dir, {git, Url, {branch, Branch}}) ->
     %% Fetch remote so we can check if the branch has changed
     SafeBranch = rebar_utils:escape_chars(Branch),
     {ok, _} = rebar_utils:sh(?FMT("git fetch origin ~ts", [SafeBranch]),
@@ -89,19 +116,19 @@ needs_update_(Dir, {git, Url, {branch, Branch}}) ->
                                    [{cd, Dir}]),
     ?DEBUG("Checking git branch ~ts for updates", [Branch]),
     not ((Current =:= []) andalso compare_url(Dir, Url));
-needs_update_(Dir, {git, Url, "main"}) ->
-    needs_update_(Dir, {git, Url, {branch, "main"}});
-needs_update_(Dir, {git, Url, "master"}) ->
-    needs_update_(Dir, {git, Url, {branch, "master"}});
-needs_update_(Dir, {git, Url}) ->
+needs_update_(GitVsn, Dir, {git, Url, "main"}) ->
+    needs_update_(GitVsn, Dir, {git, Url, {branch, "main"}});
+needs_update_(GitVsn, Dir, {git, Url, "master"}) ->
+    needs_update_(GitVsn, Dir, {git, Url, {branch, "master"}});
+needs_update_(_, Dir, {git, Url}) ->
     {ok, _} = rebar_utils:sh("git fetch origin", [{cd, Dir}]),
     {ok, Current} = rebar_utils:sh("git log HEAD..origin/HEAD --oneline",
                                    [{cd, Dir}]),
     ?DEBUG("Checking new commits from HEAD to origin/HEAD: ~.7ts", [Current]),
     not ((Current =:= []) andalso compare_url(Dir, Url));
-needs_update_(Dir, {git, Url, ""}) ->
-    needs_update_(Dir, {git, Url});
-needs_update_(Dir, {git, _, Ref}) ->
+needs_update_(GitVsn, Dir, {git, Url, ""}) ->
+    needs_update_(GitVsn, Dir, {git, Url});
+needs_update_(_, Dir, {git, _, Ref}) ->
     {ok, Current} = rebar_utils:sh(?FMT("git rev-parse --short=7 -q HEAD", []),
                                    [{cd, Dir}]),
     Current1 = rebar_string:trim(rebar_string:trim(Current, both, "\n"),
@@ -120,11 +147,28 @@ needs_update_(Dir, {git, _, Ref}) ->
     ?DEBUG("Comparing git ref ~ts with ~ts", [Ref2, Current1]),
     (Current1 =/= Ref2).
 
+got_url(Dir) ->
+    {ok, ConfigLines0} = file:read_file(filename:join([Dir, ".git", "config"])),
+    L0 = binary:split(ConfigLines0, [<<"\n">>], [trim, global]),
+    L1 = lists:dropwhile(fun(<<"[remote \"origin\"]">>) -> false;
+                            (_) -> true end, L0),
+    [Url0 | _] = lists:dropwhile(fun(<<"\turl =", _/binary>>) ->
+                                         false;
+                                    (_) -> true end, L1),
+    [_, BinUrl] = binary:split(Url0, [<<" = ">>]),
+    binary_to_list(BinUrl).
+
 compare_url(Dir, Url) ->
-    {ok, CurrentUrl} = rebar_utils:sh(?FMT("git config --get remote.origin.url", []),
-                                      [{cd, Dir}]),
-    CurrentUrl1 = rebar_string:trim(rebar_string:trim(CurrentUrl, both, "\n"),
-                                     both, "\r"),
+    CurrentUrl1 =
+        case git_vsn() of
+            got -> got_url(Dir);
+            _->
+                {ok, CurrentUrl} =
+                    rebar_utils:sh(?FMT("git config --get remote.origin.url", []),
+                                   [{cd, Dir}]),
+                rebar_string:trim(rebar_string:trim(CurrentUrl, both, "\n"),
+                                     both, "\r")
+        end,
     {ok, ParsedUrl} = parse_git_url(Url),
     {ok, ParsedCurrentUrl} = parse_git_url(CurrentUrl1),
     ?DEBUG("Comparing git url ~p with ~p", [ParsedUrl, ParsedCurrentUrl]),
@@ -210,7 +254,7 @@ git_clone(What, got, Url, Dir, Branch) when What =:= branch ; What =:= tag ->
     rebar_file_utils:mv(TmpRepoDir, filename:join(Dir, ".git")),
     file:write_file(filename:join([Dir, ".got", "repository"]), ".git\n"),
     ok;
-git_clone(ref, got, Url, Dir, Ref) ->
+git_clone(What, got, Url, Dir, Ref) when What =:= ref ; What =:= rev ->
     TmpRepoDir = ec_file:insecure_mkdtemp(),
     rebar_utils:sh(?FMT("got clone -a ~ts ~ts",
                         [rebar_utils:escape_chars(Url),
@@ -445,7 +489,7 @@ collect_default_refcount_got(Dir) ->
             end
     end.
 
-got_parse_tags(String0) when is_list(String0), length(String0) > 2 ->
+got_parse_tags([String0]) when is_list(String0), length(String0) > 2 ->
     String = string:slice(String0, 1, string:length(String0) -2),
     Tags0 = string:split(String, ", ", all),
     Tags1 = [ string:prefix(S, "tags/") || S <- Tags0 ],
