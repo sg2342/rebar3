@@ -93,6 +93,8 @@ needs_update_(got, Dir, {git, Url, {What, TagOrBranch}})
     not ((WorkDirCommit =:= RemoteCommit) andalso compare_url(Dir, Url));
 needs_update_(got, Dir, {git, Url, {ref, Ref}}) ->
     needs_update_(got, Dir, {git, Url, Ref});
+needs_update_(got, Dir, {git, Url}) ->
+    needs_update_(got, Dir, {git, Url, "origin/HEAD"});
 needs_update_(got, Dir, {git, Url, Rev}) ->
     {ok, Lines0} = rebar_utils:sh("got log -l 1", [{cd, Dir}]),
     CommitLine0 = string:nth_lexeme(Lines0, 2, "\n"),
