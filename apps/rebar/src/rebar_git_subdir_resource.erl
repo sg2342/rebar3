@@ -29,6 +29,39 @@ lock(AppInfo, _) ->
     {git_subdir, Url1, {ref, Ref}, Dir}.
 
 download(TmpDir, AppInfo, State, _) ->
+    case os:getenv("REBAR_GIT_IS_GOT") of
+        false ->
+            download(TmpDir, AppInfo, State);
+        _ ->
+            download_got(TmpDir, rebar_app_info:source(AppInfo))
+    end.
+
+download_got(Dir, {git_subdir, Url, {branch, Branch}, SparseDir}) ->
+    download_got(Dir, {git_subdir, Url, {tag, Branch}, SparseDir});
+download_got(Dir, {git_subdir, Url, {tag, Tag}, SparseDir}) ->
+    TmpRepoDir = ec_file:insecure_mkdtemp(),
+    rebar_utils:sh(?FMT("got clone -b ~ts ~ts ~ts",
+                        [rebar_utils:escape_chars(Tag),
+                         rebar_utils:escape_chars(Url),
+                         TmpRepoDir]), []),
+    rebar_utils:sh(?FMT("got checkout -b ~ts -p ~ts ~ts ~ts",
+                        [rebar_utils:escape_chars(Tag),
+                         SparseDir, TmpRepoDir, Dir]), []),
+    rebar_file_utils:mv(TmpRepoDir, filename:join(Dir, ".git")),
+    file:write_file(filename:join([Dir, ".got", "repository"]), ".git\n");
+download_got(Dir, {git_subdir, Url, {ref, Ref}, SparseDir}) ->
+    TmpRepoDir = ec_file:insecure_mkdtemp(),
+    rebar_utils:sh(?FMT("got clone -a ~ts ~ts",
+                        [rebar_utils:escape_chars(Url),
+                         TmpRepoDir]), []),
+    rebar_utils:sh(?FMT("got branch -c ~ts -r ~ts ~ts/~ts",
+                        [Ref, TmpRepoDir, Ref, Ref]), []),
+    rebar_utils:sh(?FMT("got checkout -b ~ts/~ts -p ~ts ~ts ~ts",
+                        [Ref, Ref, SparseDir, TmpRepoDir, Dir]), []),
+    rebar_file_utils:mv(TmpRepoDir, filename:join(Dir, ".git")),
+    file:write_file(filename:join([Dir, ".got", "repository"]), ".git\n").
+
+download(TmpDir, AppInfo, State) ->
     Name = rebar_app_info:name(AppInfo),
     {git_subdir, Url, Checkout, SparseDir} = rebar_app_info:source(AppInfo),
     case rebar_git_resource:download_(TmpDir, {git, Url, Checkout}, State) of
